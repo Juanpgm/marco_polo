@@ -9,6 +9,7 @@ import zipfile
 import shutil
 from folium.plugins import Fullscreen, MeasureControl, Draw
 from folium import LayerControl
+import requests
 
 st.set_page_config(layout="wide")  # Configurar la página para usar todo el ancho disponible
 
@@ -26,6 +27,22 @@ def convert_to_epsg_4326(gdf):
     """
     gdf = gdf.to_crs(epsg=4326)
     return gdf
+
+def add_to_database(df):
+    # Guardar el archivo GeoJSON en el directorio /src
+    output_path = os.path.join("src", "output.geojson")
+    df.to_file(output_path, driver="GeoJSON")
+    st.write(f"Datos añadidos a la base de datos y guardados en {output_path}")
+
+    # Enviar el archivo GeoJSON a través de la API
+    url = "http://localhost:5000/upload_geojson"
+    files = {'file': open(output_path, 'rb')}
+    response = requests.post(url, files=files)
+
+    if response.status_code == 200:
+        st.write("Archivo GeoJSON enviado y almacenado en la base de datos correctamente.")
+    else:
+        st.write("Error al enviar el archivo GeoJSON a la base de datos.")
 
 # Cargar el archivo comprimido
 uploaded_file = st.file_uploader("Cargar archivo comprimido del Shapefile", type=["zip"])
@@ -144,10 +161,7 @@ if uploaded_file is not None:
 
     # Crear una fila con un botón "Añadir a base de datos"
     if st.button("Añadir a base de datos", key="add_to_db"):
-        # Guardar el archivo GeoJSON en el directorio /src
-        output_path = os.path.join("src", "output.geojson")
-        df.to_file(output_path, driver="GeoJSON")
-        st.write(f"Datos añadidos a la base de datos y guardados en {output_path}")
+        add_to_database(df)
 
     # Mostrar el mapa en Streamlit con tamaño ajustado al canvas
     st_folium(mapa, width='100%', height=600)

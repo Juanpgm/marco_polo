@@ -1,24 +1,31 @@
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 import json
-from database import Base, engine, SessionLocal
+import os
+from fastapi import FastAPI, File, Depends, HTTPException, Query, UploadFile
+from pydantic import BaseModel
+from typing import List
+from sqlalchemy.orm import Session
+from sqlalchemy import text, distinct
+from database import Base, engine, SessionLocal, get_db
 from models import Map
 from geoalchemy2 import WKBElement
 from shapely.wkb import loads as to_shape
+from shapely.geometry import shape
+from geoalchemy2.elements import WKBElement
+from shapely.wkb import loads as wkb_loads
 
 # Crear tablas en la base de datos
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Dependencia para obtener la sesión de base de datos
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class GeoJSONFeature(BaseModel):
+    type: str
+    geometry: dict
+    properties: dict
+
+class GeoJSONFeatureCollection(BaseModel):
+    type: str
+    features: List[GeoJSONFeature]
 
 @app.post("/maps/")
 async def create_map(name: str, entity_name: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -37,6 +44,7 @@ async def create_map(name: str, entity_name: str, file: UploadFile = File(...), 
 
         for feature in geojson_data["features"]:
             geometry = feature.get("geometry")
+            properties = feature.get("properties", {})
             if not geometry:
                 raise HTTPException(status_code=400, detail="Each feature must have a geometry.")
 
@@ -46,7 +54,8 @@ async def create_map(name: str, entity_name: str, file: UploadFile = File(...), 
             mapa = Map(
                 name=name,
                 entity_name=entity_name,
-                geom=None  # Inicialmente None, se actualizará después
+                geom=None,  # Inicialmente None, se actualizará después
+                properties=properties  # Guardar las propiedades
             )
             db.add(mapa)
             db.commit()
@@ -61,29 +70,57 @@ async def create_map(name: str, entity_name: str, file: UploadFile = File(...), 
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid GeoJSON format: {e}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 @app.get("/maps/")
-def get_maps(name: str = Query(None, description="Name of the map to filter")):
+def get_maps(name: str, db: Session = Depends(get_db)):
     try:
-        db: Session = SessionLocal()
-        if name:
-            maps = db.execute(text("SELECT id, name, entity_name, ST_AsGeoJSON(geom) as geom FROM maps WHERE name = :name"), {"name": name}).fetchall()
-        else:
-            maps = db.execute(text("SELECT id, name, entity_name, ST_AsGeoJSON(geom) as geom FROM maps")).fetchall()
-        
+        maps = db.query(Map).filter(Map.name == name).all()
         response_data = []
-
         for map_item in maps:
+            geom = wkb_loads(bytes(map_item.geom.data)) if isinstance(map_item.geom, WKBElement) else None
             map_dict = {
                 "id": map_item.id,
                 "name": map_item.name,
                 "entity_name": map_item.entity_name,
-                "geom": map_item.geom
+                "geom": geom.__geo_interface__ if geom else None,
+                "properties": map_item.properties
             }
             response_data.append(map_dict)
-
         return response_data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.get("/maps/names/")
+def get_maps_names(db: Session = Depends(get_db)):
+    try:
+        names = db.query(distinct(Map.name)).all()
+        unique_names = [name[0] for name in names]
+        return unique_names
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
+@app.delete("/maps/")
+def delete_map_by_name(name: str, db: Session = Depends(get_db)):
+    """
+    Eliminar un Mapa por su nombre.
+    """
+    try:
+        maps_to_delete = db.query(Map).filter(Map.name == name).all()
+        if not maps_to_delete:
+            raise HTTPException(status_code=404, detail="Map not found")
+
+        for map_item in maps_to_delete:
+            db.delete(map_item)
+        db.commit()
+
+        return {"message": f"Map(s) with name '{name}' deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
